@@ -8,7 +8,7 @@ import base64
 import traceback
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=["https://drowsy-guard-rl822kj7d-khushis-projects-7c551b39.vercel.app"])
 
 # Load model (try TFSMLayer first, fallback to saved_model.load)
 model = None
