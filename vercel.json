@@ -9,9 +9,10 @@
     }
   ],
   "routes": [
-    { "src": "/(.*)", "dest": "frontend/$1" }
+    { "src": "/(.*)", "dest": "build/$1" }
   ],
   "env": {
     "REACT_APP_BACKEND_URL": "https://drowsyguard-backend.onrender.com"
   }
 }
+
