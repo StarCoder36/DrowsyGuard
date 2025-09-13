@@ -8,7 +8,12 @@ import base64
 import traceback
 
 app = Flask(__name__)
-CORS(app, origins=["https://drowsy-guard-rl822kj7d-khushis-projects-7c551b39.vercel.app"], supports_credentials=True)
+# This allows requests from ANY frontend (for deployment simplicity)
+CORS(app)
+
+# OR, to allow only your frontend
+# CORS(app, origins=["https://drowsy-guard-opal.vercel.app"])
+# CORS(app, origins=["https://drowsy-guard-rl822kj7d-khushis-projects-7c551b39.vercel.app"], supports_credentials=True)
 
 # Load model (try TFSMLayer first, fallback to saved_model.load)
 model = None
