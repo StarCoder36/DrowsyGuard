@@ -45,7 +45,7 @@ function App() {
       const dataUrl = canvasRef.current.toDataURL("image/jpeg");
 
       try {
-        const res = await axios.post("http://127.0.0.1:5000/predict", { image: dataUrl });
+        const res = await axios.post("https://drowsyguard-backend.onrender.com/predict", { image: dataUrl });
         const probOpen = res.data.probability_open;
         const faceFound = res.data.status !== "Not Detected";
 
