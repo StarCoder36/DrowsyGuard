@@ -27,4 +27,3 @@ __pycache__/
 *.pyc
 venv/
 .env
-my_model_tf/   
