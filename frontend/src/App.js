@@ -1,5 +1,4 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
-import axios from "axios";
 import { Line } from "react-chartjs-2";
 import {
   Chart as ChartJS,
@@ -45,9 +44,17 @@ function App() {
       const dataUrl = canvasRef.current.toDataURL("image/jpeg");
 
       try {
-        const res = await axios.post("http://127.0.0.1:5000/predict", { image: dataUrl });
-        const probOpen = res.data.probability_open;
-        const faceFound = res.data.status !== "Not Detected";
+        const response = await fetch("/predict", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image: dataUrl }),
+        });
+
+        if (!response.ok) throw new Error("Network response was not ok");
+
+        const res = await response.json();
+        const probOpen = res.probability_open;
+        const faceFound = res.status !== "Not Detected";
 
         setProbability(probOpen);
         setFaceDetected(faceFound);
@@ -55,16 +62,13 @@ function App() {
         let newStatus = "Alert";
         if (!faceFound) newStatus = "Not Detected";
         else if (probOpen < CLOSED_EYE_THRESHOLD) newStatus = "Drowsy";
-
         setStatus(newStatus);
 
         const now = Date.now();
-
         if (faceFound && newStatus === "Drowsy") {
           if (!eyeClosedStartRef.current) eyeClosedStartRef.current = now;
-
           if (now - eyeClosedStartRef.current >= ALARM_DURATION) {
-            if (alarmRef.current.paused) alarmRef.current.play().catch(err => console.log(err));
+            if (alarmRef.current.paused) alarmRef.current.play().catch(() => {});
             setDrowsyCount(prev => prev + 1);
             setLastDrowsyTime(new Date().toLocaleTimeString());
           }
@@ -81,13 +85,6 @@ function App() {
           if (newHistory.length > 100) newHistory.shift();
           return newHistory;
         });
-
-        if (faceFound) {
-          ctx.lineWidth = 3;
-          ctx.strokeStyle = newStatus === "Drowsy" ? "#ff4d4d" : "#00cc44";
-          ctx.strokeRect(0, 0, 224, 224);
-        }
-
       } catch (err) {
         console.error("Prediction error:", err);
       }
@@ -100,10 +97,8 @@ function App() {
     const startCamera = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play();
-        }
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
       } catch (err) {
         console.error("Camera error:", err);
       }
@@ -132,34 +127,30 @@ function App() {
     responsive: true,
     plugins: {
       legend: { display: false },
-      title: { display: true, text: "Eyes Open Probability Over Time", font: { size: 18 } }
+      title: { display: true, text: "Eyes Open Probability Over Time", font: { size: 18 } },
     },
     scales: {
       y: { min: 0, max: 100, title: { display: true, text: "Probability %" } },
-      x: { title: { display: true, text: "Frames" } }
-    }
+      x: { title: { display: true, text: "Frames" } },
+    },
   };
 
   return (
-    <div style={{ fontFamily: "Arial, sans-serif", background: "linear-gradient(135deg, #efebe2ff, #f0e0c6ff)", minHeight: "100vh", padding: "30px" }}>
-      {/* Attractive Heading */}
+    <div style={{ fontFamily: "Arial", background: "linear-gradient(135deg,#efebe2ff,#f0e0c6ff)", minHeight: "100vh", padding: "30px" }}>
       <h1 style={{
         textAlign: "center",
-        marginBottom: "40px",
         fontSize: "3rem",
         fontWeight: "700",
-        background: "linear-gradient(90deg, #e73eb1ff, #891bbbff)",
+        background: "linear-gradient(90deg,#e73eb1ff,#891bbbff)",
         WebkitBackgroundClip: "text",
         WebkitTextFillColor: "transparent",
         textShadow: "2px 2px 10px rgba(0,0,0,0.2)",
-        letterSpacing: "1px"
+        marginBottom: "40px"
       }}>
         🚗 Driver Drowsiness Detection Dashboard
       </h1>
 
-      {/* Top Panels */}
       <div style={{ display: "flex", justifyContent: "center", gap: "30px", flexWrap: "wrap" }}>
-        {/* Video Panel */}
         <div style={{
           position: "relative",
           borderRadius: "20px",
@@ -167,15 +158,7 @@ function App() {
           boxShadow: "0 10px 25px rgba(0,0,0,0.3)",
           backgroundColor: "#fff"
         }}>
-          <video
-            ref={videoRef}
-            width="640"
-            height="480"
-            autoPlay
-            playsInline
-            muted
-            style={{ display: "block", borderRadius: "20px" }}
-          />
+          <video ref={videoRef} width="640" height="480" autoPlay playsInline muted style={{ display: "block", borderRadius: "20px" }} />
           <canvas ref={canvasRef} width="224" height="224" style={{ display: "none" }} />
           <div style={{
             position: "absolute",
@@ -190,13 +173,10 @@ function App() {
             fontSize: "18px",
             boxShadow: "0 2px 6px rgba(0,0,0,0.3)"
           }}>
-            {faceDetected
-              ? `${status} (${(probability * 100).toFixed(1)}% eyes open)`
-              : "Face Not Detected"}
+            {faceDetected ? `${status} (${(probability * 100).toFixed(1)}% eyes open)` : "Face Not Detected"}
           </div>
         </div>
 
-        {/* Analysis Panel */}
         <div style={{
           backgroundColor: "#fff",
           borderRadius: "20px",
@@ -205,14 +185,18 @@ function App() {
           boxShadow: "0 10px 25px rgba(0,0,0,0.3)"
         }}>
           <p style={{
-            fontSize: "40px", marginBottom: "65px", color: "#333", textAlign: "center", fontWeight: "bold", background: "linear-gradient(90deg, #e73eb1ff, #891bbbff)",
+            fontSize: "40px",
+            marginBottom: "65px",
+            color: "#333",
+            textAlign: "center",
+            fontWeight: "bold",
+            background: "linear-gradient(90deg,#e73eb1ff,#891bbbff)",
             WebkitBackgroundClip: "text",
-            WebkitTextFillColor: "transparent",
+            WebkitTextFillColor: "transparent"
           }}>Analysis</p>
           <p style={{ fontSize: "18px", fontWeight: "500", marginBottom: "30px" }}><strong>Drowsy Alerts:</strong> {drowsyCount}</p>
           <p style={{ fontSize: "18px", fontWeight: "500", marginBottom: "30px" }}><strong>Last Alert Time:</strong> {lastDrowsyTime || "--:--:--"}</p>
-          <p style={{ fontSize: "18px", fontWeight: "500", marginBottom: "50px" }}><strong>Face Detected:</strong> {faceDetected ? "Yes" : "No"}</p>
-
+          <p style={{ fontSize: "18px", fontWeight: "500", marginBottom: "30px" }}><strong>Face Detected:</strong> {faceDetected ? "Yes" : "No"}</p>
           <div style={{ marginTop: "20px" }}>
             <div style={{ height: "45px", backgroundColor: "#eee", borderRadius: "22px", overflow: "hidden" }}>
               <div style={{
@@ -229,7 +213,6 @@ function App() {
         </div>
       </div>
 
-      {/* Live Chart Panel */}
       <div style={{
         marginTop: "50px",
         padding: "25px",

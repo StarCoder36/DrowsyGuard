@@ -1,109 +1,80 @@
-# backend/app.py
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-import tensorflow as tf
-import numpy as np
-import cv2
+import os
 import base64
+import cv2
+import numpy as np
+import tensorflow as tf
 import traceback
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="../frontend/build", static_url_path="")
 CORS(app)
 
-# Load model (try TFSMLayer first, fallback to saved_model.load)
+# === Load ML Model ===
+MODEL_DIR = "my_model_tf"
 model = None
 infer = None
-MODEL_DIR = "my_model_tf"
 
 try:
-    # TFSMLayer is the Keras 3 friendly wrapper for SavedModel
-    model = tf.keras.layers.TFSMLayer(MODEL_DIR, call_endpoint="serving_default")
-    print("Loaded model with TFSMLayer.")
+    # Try loading as SavedModel
+    saved = tf.saved_model.load(MODEL_DIR)
+    infer = saved.signatures.get("serving_default") or list(saved.signatures.values())[0]
+    print("✅ Loaded TensorFlow SavedModel successfully.")
 except Exception as e:
-    print("TFSMLayer load failed, trying tf.saved_model.load() fallback:", e)
-    try:
-        saved = tf.saved_model.load(MODEL_DIR)
-        # try to get the serving_default signature
-        infer = saved.signatures.get("serving_default", None)
-        if infer is None:
-            # pick any callable attribute if available
-            infer = list(saved.signatures.values())[0] if saved.signatures else None
-        print("Loaded SavedModel; using signature for inference.")
-    except Exception as e2:
-        print("Failed to load model:", e2)
-        raise
+    print("❌ Failed to load model:", e)
+    raise
 
-# Haar cascades
+# === Haar cascades for face/eyes ===
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 eye_cascade  = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
 
 def preprocess_frame(frame):
-    """Resize and normalize frame for model input (returns shape (1,224,224,3))."""
+    """Resize & normalize for model input"""
     img = cv2.resize(frame, (224, 224))
     img = img.astype("float32") / 255.0
     return np.expand_dims(img, axis=0)
 
 def predict_prob_open(processed):
-    """
-    Call the model (TFSMLayer or signature) and return scalar prob_open (float).
-    Handles tensor, dict, list/tuple return types robustly.
-    """
-    # Call model
-    if model is not None:
-        pred = model(processed, training=False)
-    elif infer is not None:
-        # signature expects a tf.Tensor input keyed by input name or positional; try both
-        t = tf.convert_to_tensor(processed, dtype=tf.float32)
-        try:
-            # many signatures accept the tensor as the first arg (positional)
-            out = infer(t)
-        except Exception:
-            # or as a dict with input name
-            # try to find input key from signature
-            out = infer(**{list(infer.structured_input_signature[1].keys())[0]: t})
-        pred = out
-    else:
-        raise RuntimeError("No model available for prediction")
-
-    # Normalize pred -> numpy array
+    """Call model and return probability eyes open"""
+    t = tf.convert_to_tensor(processed, dtype=tf.float32)
     try:
-        if isinstance(pred, dict):
-            first_val = next(iter(pred.values()))
-            arr = first_val.numpy() if tf.is_tensor(first_val) else np.array(first_val)
-        elif tf.is_tensor(pred):
-            arr = pred.numpy()
-        elif isinstance(pred, (list, tuple)):
-            first = pred[0]
-            arr = first.numpy() if tf.is_tensor(first) else np.array(first)
-        else:
-            arr = np.array(pred)
+        pred = infer(t)
     except Exception:
-        # Final fallback: convert to numpy via np.array
+        # Sometimes signature expects named input
+        pred = infer(**{list(infer.structured_input_signature[1].keys())[0]: t})
+
+    # Convert output to scalar
+    if isinstance(pred, dict):
+        first_val = next(iter(pred.values()))
+        arr = first_val.numpy() if tf.is_tensor(first_val) else np.array(first_val)
+    elif tf.is_tensor(pred):
+        arr = pred.numpy()
+    elif isinstance(pred, (list, tuple)):
+        arr = pred[0].numpy() if tf.is_tensor(pred[0]) else np.array(pred[0])
+    else:
         arr = np.array(pred)
 
-    # Expect arr to contain at least one scalar probability at index [0][0] or [0]
     arr = np.array(arr).reshape(-1)
-    if arr.size == 0:
-        return 0.0
-    prob_open = float(arr[0])
-    return prob_open
+    return float(arr[0]) if arr.size > 0 else 0.0
 
-@app.route("/", methods=["GET"])
-def home():
-    return (
-        "✅ Driver Drowsiness Detection Backend Running\n"
-        "POST an image (JSON) to /predict with: {'image': 'data:image/jpeg;base64,...'}"
-    )
+# === Serve React frontend ===
+@app.route("/", defaults={"path": ""})
+@app.route("/<path:path>")
+def serve_react(path):
+    if path != "" and os.path.exists(os.path.join(app.static_folder, path)):
+        return send_from_directory(app.static_folder, path)
+    else:
+        return send_from_directory(app.static_folder, "index.html")
 
+# === API: /predict ===
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        payload = request.get_json(force=True, silent=True)
+        payload = request.get_json(force=True)
         if not payload or "image" not in payload:
-            return jsonify({"error": "Request must be JSON with key 'image' (base64 data URL)"}), 400
+            return jsonify({"error": "No image provided"}), 400
 
         data = payload["image"]
-        # Accept either "data:image/jpeg;base64,...." or raw base64
         if "," in data:
             _, b64 = data.split(",", 1)
         else:
@@ -113,34 +84,23 @@ def predict():
         np_arr = np.frombuffer(img_bytes, np.uint8)
         frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
         if frame is None:
-            return jsonify({"error": "Could not decode image"}), 400
+            return jsonify({"error": "Invalid image"}), 400
 
-        # Detect face & eyes
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = face_cascade.detectMultiScale(gray, 1.1, 4)
 
         if len(faces) == 0:
-            # No face — return original frame and Not Detected
             _, buffer = cv2.imencode(".jpg", frame)
             img_str = "data:image/jpeg;base64," + base64.b64encode(buffer).decode()
             return jsonify({"status": "Not Detected", "probability_open": 0.0, "frame": img_str})
 
         # Use first face
         x, y, w, h = faces[0]
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        roi_gray = gray[y:y+h, x:x+w]
         roi_color = frame[y:y+h, x:x+w]
-
-        eyes = eye_cascade.detectMultiScale(roi_gray)
-        for (ex, ey, ew, eh) in eyes:
-            cv2.rectangle(roi_color, (ex, ey), (ex + ew, ey + eh), (255, 0, 0), 2)
-
-        # Predict probability on face ROI
         processed = preprocess_frame(roi_color)
         prob_open = predict_prob_open(processed)
         status = "Open Eyes" if prob_open >= 0.65 else "Closed Eyes"
 
-        # Encode annotated frame back to base64
         _, buffer = cv2.imencode(".jpg", frame)
         img_str = "data:image/jpeg;base64," + base64.b64encode(buffer).decode()
 
@@ -150,7 +110,7 @@ def predict():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+# === Run app ===
 if __name__ == "__main__":
-    # bind to 0.0.0.0 so other devices (or React on same machine) can reach it,
-    # and set debug True during development.
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
+
