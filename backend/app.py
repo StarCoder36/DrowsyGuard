@@ -10,40 +10,46 @@ import traceback
 app = Flask(__name__, static_folder="../frontend/build", static_url_path="")
 CORS(app)
 
-# === Load ML Model ===
-MODEL_DIR = "my_model_tf"
-model = None
-infer = None
+# -------------------------------
+# 1️⃣ Load TensorFlow SavedModel
+# -------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.path.join(BASE_DIR, "my_model_tf")
 
-try:
-    # Try loading as SavedModel
-    saved = tf.saved_model.load(MODEL_DIR)
-    infer = saved.signatures.get("serving_default") or list(saved.signatures.values())[0]
-    print("✅ Loaded TensorFlow SavedModel successfully.")
-except Exception as e:
-    print("❌ Failed to load model:", e)
-    raise
+print("🔍 Checking if model exists at:", MODEL_DIR)
 
-# === Haar cascades for face/eyes ===
+if not os.path.exists(MODEL_DIR):
+    print("❌ Model folder does not exist! Check path and commit model to repo.")
+    model_loaded = False
+else:
+    files_in_model = os.listdir(MODEL_DIR)
+    print("📂 Files in model folder:", files_in_model)
+    try:
+        saved = tf.saved_model.load(MODEL_DIR)
+        infer = saved.signatures.get("serving_default") or list(saved.signatures.values())[0]
+        print("✅ Loaded TensorFlow SavedModel successfully.")
+        model_loaded = True
+    except Exception as e:
+        print("❌ Failed to load model:", e)
+        model_loaded = False
+
+# -------------------------------
+# 2️⃣ Haar cascades for face/eyes
+# -------------------------------
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 eye_cascade  = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
 
 def preprocess_frame(frame):
-    """Resize & normalize for model input"""
     img = cv2.resize(frame, (224, 224))
     img = img.astype("float32") / 255.0
     return np.expand_dims(img, axis=0)
 
 def predict_prob_open(processed):
-    """Call model and return probability eyes open"""
     t = tf.convert_to_tensor(processed, dtype=tf.float32)
     try:
         pred = infer(t)
     except Exception:
-        # Sometimes signature expects named input
         pred = infer(**{list(infer.structured_input_signature[1].keys())[0]: t})
-
-    # Convert output to scalar
     if isinstance(pred, dict):
         first_val = next(iter(pred.values()))
         arr = first_val.numpy() if tf.is_tensor(first_val) else np.array(first_val)
@@ -53,11 +59,12 @@ def predict_prob_open(processed):
         arr = pred[0].numpy() if tf.is_tensor(pred[0]) else np.array(pred[0])
     else:
         arr = np.array(pred)
-
     arr = np.array(arr).reshape(-1)
     return float(arr[0]) if arr.size > 0 else 0.0
 
-# === Serve React frontend ===
+# -------------------------------
+# 3️⃣ Serve React frontend
+# -------------------------------
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def serve_react(path):
@@ -66,9 +73,14 @@ def serve_react(path):
     else:
         return send_from_directory(app.static_folder, "index.html")
 
-# === API: /predict ===
+# -------------------------------
+# 4️⃣ Predict endpoint
+# -------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
+    if not model_loaded:
+        return jsonify({"error": "Model not loaded"}), 500
+
     try:
         payload = request.get_json(force=True)
         if not payload or "image" not in payload:
@@ -94,7 +106,6 @@ def predict():
             img_str = "data:image/jpeg;base64," + base64.b64encode(buffer).decode()
             return jsonify({"status": "Not Detected", "probability_open": 0.0, "frame": img_str})
 
-        # Use first face
         x, y, w, h = faces[0]
         roi_color = frame[y:y+h, x:x+w]
         processed = preprocess_frame(roi_color)
@@ -110,7 +121,9 @@ def predict():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-# === Run app ===
+# -------------------------------
+# 5️⃣ Run server
+# -------------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
-
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
