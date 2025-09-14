@@ -27,9 +27,34 @@ function App() {
   const [drowsyCount, setDrowsyCount] = useState(0);
   const [lastDrowsyTime, setLastDrowsyTime] = useState(null);
   const [probHistory, setProbHistory] = useState([]);
+  const [isConnected, setIsConnected] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
 
   const CLOSED_EYE_THRESHOLD = 0.65;
   const ALARM_DURATION = 2000;
+  const BACKEND_URL = "https://drowsyguard-backend.onrender.com/predict";
+
+  // Configure axios defaults
+  axios.defaults.timeout = 10000;
+  axios.defaults.headers.post['Content-Type'] = 'application/json';
+
+  const testConnection = useCallback(async () => {
+    try {
+      const response = await axios.get("https://drowsyguard-backend.onrender.com/", {
+        timeout: 5000,
+        headers: {
+          'Accept': 'application/json',
+        }
+      });
+      setIsConnected(true);
+      setErrorMessage("");
+      console.log("✅ Backend connection successful:", response.data);
+    } catch (error) {
+      setIsConnected(false);
+      console.error("❌ Backend connection failed:", error);
+      setErrorMessage(`Connection failed: ${error.message}`);
+    }
+  }, []);
 
   const processFrame = useCallback(async (time) => {
     if (!videoRef.current || !canvasRef.current) {
@@ -42,15 +67,28 @@ function App() {
 
       const ctx = canvasRef.current.getContext("2d");
       ctx.drawImage(videoRef.current, 0, 0, 224, 224);
-      const dataUrl = canvasRef.current.toDataURL("image/jpeg");
+      const dataUrl = canvasRef.current.toDataURL("image/jpeg", 0.8);
 
       try {
-        const res = await axios.post("https://drowsyguard-backend.onrender.com/predict", { image: dataUrl });
+        const res = await axios({
+          method: 'POST',
+          url: BACKEND_URL,
+          data: { image: dataUrl },
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+          },
+          timeout: 8000,
+          withCredentials: false
+        });
+
         const probOpen = res.data.probability_open;
         const faceFound = res.data.status !== "Not Detected";
 
         setProbability(probOpen);
         setFaceDetected(faceFound);
+        setIsConnected(true);
+        setErrorMessage("");
 
         let newStatus = "Alert";
         if (!faceFound) newStatus = "Not Detected";
@@ -90,6 +128,15 @@ function App() {
 
       } catch (err) {
         console.error("Prediction error:", err);
+        setIsConnected(false);
+
+        if (err.code === 'ERR_NETWORK') {
+          setErrorMessage("Network error - backend might be down");
+        } else if (err.code === 'ECONNABORTED') {
+          setErrorMessage("Request timeout - backend is slow");
+        } else {
+          setErrorMessage(`Error: ${err.message}`);
+        }
       }
     }
 
@@ -106,14 +153,21 @@ function App() {
         }
       } catch (err) {
         console.error("Camera error:", err);
+        setErrorMessage("Camera access denied");
       }
     };
 
     startCamera();
+    testConnection();
     alarmRef.current = new Audio("/alarm.mp3");
     alarmRef.current.loop = true;
     requestAnimationFrame(processFrame);
-  }, [processFrame]);
+
+    // Test connection every 30 seconds
+    const connectionInterval = setInterval(testConnection, 30000);
+
+    return () => clearInterval(connectionInterval);
+  }, [processFrame, testConnection]);
 
   const chartData = {
     labels: probHistory.map((_, i) => i + 1),
@@ -142,10 +196,64 @@ function App() {
 
   return (
     <div style={{ fontFamily: "Arial, sans-serif", background: "linear-gradient(135deg, #efebe2ff, #f0e0c6ff)", minHeight: "100vh", padding: "30px" }}>
+      {/* Connection Status Banner */}
+      {!isConnected && (
+        <div style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          right: 0,
+          backgroundColor: "#ff4444",
+          color: "white",
+          padding: "10px",
+          textAlign: "center",
+          zIndex: 1000,
+          fontSize: "16px",
+          fontWeight: "bold"
+        }}>
+          ⚠️ Backend Disconnected: {errorMessage}
+          <button
+            onClick={testConnection}
+            style={{
+              marginLeft: "15px",
+              padding: "5px 15px",
+              backgroundColor: "white",
+              color: "#ff4444",
+              border: "none",
+              borderRadius: "5px",
+              cursor: "pointer",
+              fontWeight: "bold"
+            }}
+          >
+            Retry Connection
+          </button>
+        </div>
+      )}
+
+      {/* Success Banner */}
+      {isConnected && errorMessage === "" && (
+        <div style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          right: 0,
+          backgroundColor: "#00cc44",
+          color: "white",
+          padding: "10px",
+          textAlign: "center",
+          zIndex: 1000,
+          fontSize: "16px",
+          fontWeight: "bold"
+        }}>
+          ✅ Backend Connected Successfully
+        </div>
+      )}
+
       {/* Attractive Heading */}
       <h1 style={{
         textAlign: "center",
         marginBottom: "40px",
+        marginTop: isConnected || errorMessage ? "60px" : "0",
         fontSize: "3rem",
         fontWeight: "700",
         background: "linear-gradient(90deg, #e73eb1ff, #891bbbff)",
@@ -209,6 +317,28 @@ function App() {
             WebkitBackgroundClip: "text",
             WebkitTextFillColor: "transparent",
           }}>Analysis</p>
+
+          {/* Connection Status Indicator */}
+          <div style={{
+            display: "flex",
+            alignItems: "center",
+            marginBottom: "20px",
+            padding: "10px",
+            borderRadius: "10px",
+            backgroundColor: isConnected ? "#e8f5e8" : "#ffe8e8"
+          }}>
+            <span style={{
+              width: "12px",
+              height: "12px",
+              borderRadius: "50%",
+              backgroundColor: isConnected ? "#00cc44" : "#ff4444",
+              marginRight: "10px"
+            }}></span>
+            <span style={{ fontWeight: "500" }}>
+              Backend: {isConnected ? "Connected" : "Disconnected"}
+            </span>
+          </div>
+
           <p style={{ fontSize: "18px", fontWeight: "500", marginBottom: "30px" }}><strong>Drowsy Alerts:</strong> {drowsyCount}</p>
           <p style={{ fontSize: "18px", fontWeight: "500", marginBottom: "30px" }}><strong>Last Alert Time:</strong> {lastDrowsyTime || "--:--:--"}</p>
           <p style={{ fontSize: "18px", fontWeight: "500", marginBottom: "50px" }}><strong>Face Detected:</strong> {faceDetected ? "Yes" : "No"}</p>
