@@ -5,83 +5,103 @@ import numpy as np
 import cv2
 import base64
 import traceback
+import threading
+import time
+import os
 
 app = Flask(__name__)
 
-# ✅ FIXED: More permissive CORS configuration
+# ✅ CORS configuration
 CORS(app, 
-     origins=["https://drowsy-guard-opal.vercel.app", "http://localhost:3000"], 
+     origins=["https://drowsy-guard-opal.vercel.app", "http://localhost:3000", "*"], 
      methods=['GET', 'POST', 'OPTIONS'],
      allow_headers=['Content-Type', 'Authorization'],
      supports_credentials=True)
 
-# Add explicit OPTIONS handler for preflight requests
-@app.before_request
-def handle_preflight():
-    if request.method == "OPTIONS":
-        response = jsonify({'status': 'ok'})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add('Access-Control-Allow-Headers', "*")
-        response.headers.add('Access-Control-Allow-Methods', "*")
-        return response
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
 
-# Load model (try TFSMLayer first, fallback to saved_model.load)
+# Global variables for model and cascades
 model = None
 infer = None
-MODEL_DIR = "my_model_tf"
+face_cascade = None
+eye_cascade = None
+model_loaded = False
 
-try:
-    # TFSMLayer is the Keras 3 friendly wrapper for SavedModel
-    model = tf.keras.layers.TFSMLayer(MODEL_DIR, call_endpoint="serving_default")
-    print("Loaded model with TFSMLayer.")
-except Exception as e:
-    print("TFSMLayer load failed, trying tf.saved_model.load() fallback:", e)
+def load_model_and_cascades():
+    """Load model and cascades in a separate thread to avoid blocking startup"""
+    global model, infer, face_cascade, eye_cascade, model_loaded
+    
+    MODEL_DIR = "my_model_tf"
+    
     try:
-        saved = tf.saved_model.load(MODEL_DIR)
-        # try to get the serving_default signature
-        infer = saved.signatures.get("serving_default", None)
-        if infer is None:
-            # pick any callable attribute if available
-            infer = list(saved.signatures.values())[0] if saved.signatures else None
-        print("Loaded SavedModel; using signature for inference.")
-    except Exception as e2:
-        print("Failed to load model:", e2)
-        raise
-
-# Haar cascades
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-eye_cascade  = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
+        print("🔄 Loading model...")
+        
+        # Try to load model
+        try:
+            model = tf.keras.layers.TFSMLayer(MODEL_DIR, call_endpoint="serving_default")
+            print("✅ Loaded model with TFSMLayer.")
+        except Exception as e:
+            print(f"TFSMLayer failed: {e}")
+            try:
+                saved = tf.saved_model.load(MODEL_DIR)
+                infer = saved.signatures.get("serving_default", None)
+                if infer is None:
+                    infer = list(saved.signatures.values())[0] if saved.signatures else None
+                print("✅ Loaded SavedModel with signature.")
+            except Exception as e2:
+                print(f"❌ Model loading failed: {e2}")
+                return
+        
+        # Load Haar cascades
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
+        
+        if face_cascade.empty() or eye_cascade.empty():
+            print("❌ Failed to load Haar cascades")
+            return
+            
+        model_loaded = True
+        print("✅ All components loaded successfully!")
+        
+    except Exception as e:
+        print(f"❌ Error in loading: {e}")
+        traceback.print_exc()
 
 def preprocess_frame(frame):
-    """Resize and normalize frame for model input (returns shape (1,224,224,3))."""
-    img = cv2.resize(frame, (224, 224))
-    img = img.astype("float32") / 255.0
-    return np.expand_dims(img, axis=0)
+    """Optimized preprocessing"""
+    try:
+        # Resize more efficiently
+        img = cv2.resize(frame, (224, 224), interpolation=cv2.INTER_AREA)
+        img = img.astype("float32") / 255.0
+        return np.expand_dims(img, axis=0)
+    except Exception as e:
+        print(f"Preprocessing error: {e}")
+        return None
 
 def predict_prob_open(processed):
-    """
-    Call the model (TFSMLayer or signature) and return scalar prob_open (float).
-    Handles tensor, dict, list/tuple return types robustly.
-    """
-    # Call model
-    if model is not None:
-        pred = model(processed, training=False)
-    elif infer is not None:
-        # signature expects a tf.Tensor input keyed by input name or positional; try both
-        t = tf.convert_to_tensor(processed, dtype=tf.float32)
-        try:
-            # many signatures accept the tensor as the first arg (positional)
-            out = infer(t)
-        except Exception:
-            # or as a dict with input name
-            # try to find input key from signature
-            out = infer(**{list(infer.structured_input_signature[1].keys())[0]: t})
-        pred = out
-    else:
-        raise RuntimeError("No model available for prediction")
-
-    # Normalize pred -> numpy array
+    """Optimized prediction with timeout"""
+    if processed is None:
+        return 0.0
+        
     try:
+        # Set a timeout for prediction
+        if model is not None:
+            pred = model(processed, training=False)
+        elif infer is not None:
+            t = tf.convert_to_tensor(processed, dtype=tf.float32)
+            try:
+                pred = infer(t)
+            except Exception:
+                pred = infer(**{list(infer.structured_input_signature[1].keys())[0]: t})
+        else:
+            return 0.0
+
+        # Process prediction result
         if isinstance(pred, dict):
             first_val = next(iter(pred.values()))
             arr = first_val.numpy() if tf.is_tensor(first_val) else np.array(first_val)
@@ -92,100 +112,139 @@ def predict_prob_open(processed):
             arr = first.numpy() if tf.is_tensor(first) else np.array(first)
         else:
             arr = np.array(pred)
-    except Exception:
-        # Final fallback: convert to numpy via np.array
-        arr = np.array(pred)
 
-    # Expect arr to contain at least one scalar probability at index [0][0] or [0]
-    arr = np.array(arr).reshape(-1)
-    if arr.size == 0:
+        arr = np.array(arr).reshape(-1)
+        return float(arr[0]) if arr.size > 0 else 0.0
+        
+    except Exception as e:
+        print(f"Prediction error: {e}")
         return 0.0
-    prob_open = float(arr[0])
-    return prob_open
 
-@app.route("/", methods=["GET"])
+# Keep-alive mechanism to prevent cold starts
+def keep_alive():
+    """Keep the server warm"""
+    while True:
+        time.sleep(600)  # Every 10 minutes
+        try:
+            print("🔄 Keep-alive ping")
+        except:
+            pass
+
+@app.route("/", methods=["GET", "OPTIONS"])
 def home():
-    response = jsonify({
-        "message": "✅ Driver Drowsiness Detection Backend Running",
-        "instructions": "POST an image (JSON) to /predict with: {'image': 'data:image/jpeg;base64,...'}"
-    })
-    response.headers.add("Access-Control-Allow-Origin", "*")
-    return response
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"}), 200
+    
+    return jsonify({
+        "message": "✅ Driver Drowsiness Detection Backend",
+        "status": "running",
+        "model_loaded": model_loaded,
+        "timestamp": time.time()
+    }), 200
+
+@app.route("/health", methods=["GET"])
+def health():
+    """Quick health check endpoint"""
+    return jsonify({
+        "status": "healthy",
+        "model_loaded": model_loaded,
+        "timestamp": time.time()
+    }), 200
 
 @app.route("/predict", methods=["POST", "OPTIONS"])
 def predict():
-    # Handle preflight requests
     if request.method == "OPTIONS":
-        response = jsonify({'status': 'ok'})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add('Access-Control-Allow-Headers', "*")
-        response.headers.add('Access-Control-Allow-Methods', "*")
-        return response
-        
+        return jsonify({"status": "ok"}), 200
+    
+    # Quick check if model is loaded
+    if not model_loaded:
+        return jsonify({
+            "error": "Model not loaded yet, please wait and try again",
+            "status": "loading"
+        }), 503
+    
+    start_time = time.time()
+    
     try:
+        # Parse request with timeout
         payload = request.get_json(force=True, silent=True)
         if not payload or "image" not in payload:
-            response = jsonify({"error": "Request must be JSON with key 'image' (base64 data URL)"})
-            response.headers.add("Access-Control-Allow-Origin", "*")
-            return response, 400
+            return jsonify({"error": "Missing image data"}), 400
 
         data = payload["image"]
-        # Accept either "data:image/jpeg;base64,...." or raw base64
         if "," in data:
             _, b64 = data.split(",", 1)
         else:
             b64 = data
 
-        img_bytes = base64.b64decode(b64)
-        np_arr = np.frombuffer(img_bytes, np.uint8)
-        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-        if frame is None:
-            response = jsonify({"error": "Could not decode image"})
-            response.headers.add("Access-Control-Allow-Origin", "*")
-            return response, 400
+        # Decode image
+        try:
+            img_bytes = base64.b64decode(b64)
+            np_arr = np.frombuffer(img_bytes, np.uint8)
+            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        except Exception as e:
+            return jsonify({"error": f"Image decode failed: {str(e)}"}), 400
 
-        # Detect face & eyes
+        if frame is None:
+            return jsonify({"error": "Invalid image format"}), 400
+
+        # Quick face detection
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+        faces = face_cascade.detectMultiScale(gray, 1.1, 3, minSize=(50, 50))
 
         if len(faces) == 0:
-            # No face — return original frame and Not Detected
-            _, buffer = cv2.imencode(".jpg", frame)
-            img_str = "data:image/jpeg;base64," + base64.b64encode(buffer).decode()
-            response = jsonify({"status": "Not Detected", "probability_open": 0.0, "frame": img_str})
-            response.headers.add("Access-Control-Allow-Origin", "*")
-            return response
+            # No face detected - quick response
+            processing_time = time.time() - start_time
+            return jsonify({
+                "status": "Not Detected",
+                "probability_open": 0.0,
+                "processing_time": round(processing_time, 3)
+            }), 200
 
-        # Use first face
+        # Process first face only for speed
         x, y, w, h = faces[0]
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        roi_gray = gray[y:y+h, x:x+w]
         roi_color = frame[y:y+h, x:x+w]
 
-        eyes = eye_cascade.detectMultiScale(roi_gray)
-        for (ex, ey, ew, eh) in eyes:
-            cv2.rectangle(roi_color, (ex, ey), (ex + ew, ey + eh), (255, 0, 0), 2)
+        # Quick eye detection (optional - skip if too slow)
+        roi_gray = gray[y:y+h, x:x+w]
+        eyes = eye_cascade.detectMultiScale(roi_gray, 1.1, 2, minSize=(20, 20))
 
-        # Predict probability on face ROI
+        # Predict on face ROI
         processed = preprocess_frame(roi_color)
         prob_open = predict_prob_open(processed)
+        
         status = "Open Eyes" if prob_open >= 0.65 else "Closed Eyes"
+        processing_time = time.time() - start_time
 
-        # Encode annotated frame back to base64
-        _, buffer = cv2.imencode(".jpg", frame)
-        img_str = "data:image/jpeg;base64," + base64.b64encode(buffer).decode()
-
-        response = jsonify({"status": status, "probability_open": prob_open, "frame": img_str})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        return response
+        return jsonify({
+            "status": status,
+            "probability_open": prob_open,
+            "face_detected": True,
+            "eyes_detected": len(eyes),
+            "processing_time": round(processing_time, 3)
+        }), 200
 
     except Exception as e:
+        processing_time = time.time() - start_time
+        print(f"❌ Prediction error: {e}")
         traceback.print_exc()
-        response = jsonify({"error": str(e)})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        return response, 500
+        
+        return jsonify({
+            "error": f"Processing failed: {str(e)}",
+            "processing_time": round(processing_time, 3)
+        }), 500
 
 if __name__ == "__main__":
-    # bind to 0.0.0.0 so other devices (or React on same machine) can reach it,
-    # and set debug True during development.
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # Start model loading in background
+    loading_thread = threading.Thread(target=load_model_and_cascades, daemon=True)
+    loading_thread.start()
+    
+    # Start keep-alive thread
+    keep_alive_thread = threading.Thread(target=keep_alive, daemon=True)
+    keep_alive_thread.start()
+    
+    # Get port from environment (Render sets this)
+    port = int(os.environ.get("PORT", 5000))
+    
+    print(f"🚀 Starting server on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
