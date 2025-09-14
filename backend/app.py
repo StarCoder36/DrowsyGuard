@@ -8,11 +8,22 @@ import traceback
 
 app = Flask(__name__)
 
-# ✅ Allow requests from your current frontend URL
-CORS(app, resources={r"/*": {"origins": ["https://drowsy-guard-opal.vercel.app"]}})
-# ---------------- Your existing model & routes code ----------------
-# (keep all your model loading, predict route, etc. exactly as before)
+# ✅ FIXED: More permissive CORS configuration
+CORS(app, 
+     origins=["https://drowsy-guard-opal.vercel.app", "http://localhost:3000"], 
+     methods=['GET', 'POST', 'OPTIONS'],
+     allow_headers=['Content-Type', 'Authorization'],
+     supports_credentials=True)
 
+# Add explicit OPTIONS handler for preflight requests
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        response = jsonify({'status': 'ok'})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add('Access-Control-Allow-Headers', "*")
+        response.headers.add('Access-Control-Allow-Methods', "*")
+        return response
 
 # Load model (try TFSMLayer first, fallback to saved_model.load)
 model = None
@@ -94,17 +105,29 @@ def predict_prob_open(processed):
 
 @app.route("/", methods=["GET"])
 def home():
-    return (
-        "✅ Driver Drowsiness Detection Backend Running\n"
-        "POST an image (JSON) to /predict with: {'image': 'data:image/jpeg;base64,...'}"
-    )
+    response = jsonify({
+        "message": "✅ Driver Drowsiness Detection Backend Running",
+        "instructions": "POST an image (JSON) to /predict with: {'image': 'data:image/jpeg;base64,...'}"
+    })
+    response.headers.add("Access-Control-Allow-Origin", "*")
+    return response
 
-@app.route("/predict", methods=["POST"])
+@app.route("/predict", methods=["POST", "OPTIONS"])
 def predict():
+    # Handle preflight requests
+    if request.method == "OPTIONS":
+        response = jsonify({'status': 'ok'})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add('Access-Control-Allow-Headers', "*")
+        response.headers.add('Access-Control-Allow-Methods', "*")
+        return response
+        
     try:
         payload = request.get_json(force=True, silent=True)
         if not payload or "image" not in payload:
-            return jsonify({"error": "Request must be JSON with key 'image' (base64 data URL)"}), 400
+            response = jsonify({"error": "Request must be JSON with key 'image' (base64 data URL)"})
+            response.headers.add("Access-Control-Allow-Origin", "*")
+            return response, 400
 
         data = payload["image"]
         # Accept either "data:image/jpeg;base64,...." or raw base64
@@ -117,7 +140,9 @@ def predict():
         np_arr = np.frombuffer(img_bytes, np.uint8)
         frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
         if frame is None:
-            return jsonify({"error": "Could not decode image"}), 400
+            response = jsonify({"error": "Could not decode image"})
+            response.headers.add("Access-Control-Allow-Origin", "*")
+            return response, 400
 
         # Detect face & eyes
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -127,7 +152,9 @@ def predict():
             # No face — return original frame and Not Detected
             _, buffer = cv2.imencode(".jpg", frame)
             img_str = "data:image/jpeg;base64," + base64.b64encode(buffer).decode()
-            return jsonify({"status": "Not Detected", "probability_open": 0.0, "frame": img_str})
+            response = jsonify({"status": "Not Detected", "probability_open": 0.0, "frame": img_str})
+            response.headers.add("Access-Control-Allow-Origin", "*")
+            return response
 
         # Use first face
         x, y, w, h = faces[0]
@@ -148,11 +175,15 @@ def predict():
         _, buffer = cv2.imencode(".jpg", frame)
         img_str = "data:image/jpeg;base64," + base64.b64encode(buffer).decode()
 
-        return jsonify({"status": status, "probability_open": prob_open, "frame": img_str})
+        response = jsonify({"status": status, "probability_open": prob_open, "frame": img_str})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        return response
 
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        response = jsonify({"error": str(e)})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        return response, 500
 
 if __name__ == "__main__":
     # bind to 0.0.0.0 so other devices (or React on same machine) can reach it,
