@@ -9,8 +9,7 @@ import traceback
 app = Flask(__name__)
 
 # ✅ Allow requests from your current frontend URL
-CORS(app, origins=["https://drowsy-guard-opal.vercel.app"], supports_credentials=True)
-
+CORS(app, resources={r"/*": {"origins": ["https://drowsy-guard-opal.vercel.app"]}})
 # ---------------- Your existing model & routes code ----------------
 # (keep all your model loading, predict route, etc. exactly as before)
 
